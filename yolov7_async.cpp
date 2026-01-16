@@ -1,4 +1,5 @@
 #include <dxrt/dxrt_api.h>
+
 #include <atomic>
 #include <chrono>
 #include <common_util.hpp>
@@ -119,11 +120,29 @@ public:
 
 cv::Scalar get_class_color(int class_id)
 {
+    // Use class_id as seed for consistent color generation
+    // This ensures same class always gets same color
     std::srand(class_id);
-    return cv::Scalar(std::rand() % 256, std::rand() % 256, std::rand() % 256);
+
+    // Generate random BGR values (0-255)
+    int b = std::rand() % 256;
+    int g = std::rand() % 256;
+    int r = std::rand() % 256;
+
+    return cv::Scalar(b, g, r);
 }
 
-void make_letterbox_image(const cv::Mat &image, cv::Mat &preprocessed_image, const int color_space, std::vector<int> &pad_xy)
+/**
+ * @brief Resize the input image to the specified size and apply letterbox
+ * padding for preprocessing.
+ * @param image Original input image
+ * @param preprocessed_image Mat object to store the preprocessed result
+ * (already sized)
+ * @param color_space Color space conversion code (e.g., cv::COLOR_BGR2RGB)
+ * @param pad_xy [x, y] vector for padding size
+ */
+void make_letterbox_image(const cv::Mat &image, cv::Mat &preprocessed_image, const int color_space,
+                          std::vector<int> &pad_xy)
 {
     int input_width = preprocessed_image.cols;
     int input_height = preprocessed_image.rows;
@@ -138,15 +157,28 @@ void make_letterbox_image(const cv::Mat &image, cv::Mat &preprocessed_image, con
         return;
     }
 
-    int new_width = input_width - (letterbox_pad_x * 2);
-    int new_height = input_height - (letterbox_pad_y * 2);
+    int new_width = input_width - letterbox_pad_x * 2;
+    int new_height = input_height - letterbox_pad_y * 2;
     cv::resize(image, resized_image, cv::Size(new_width, new_height));
     cv::cvtColor(resized_image, resized_image, color_space);
-    cv::copyMakeBorder(resized_image, preprocessed_image, letterbox_pad_y, letterbox_pad_y,
-                       letterbox_pad_x, letterbox_pad_x, cv::BORDER_CONSTANT, cv::Scalar(114));
+    int top = letterbox_pad_y;
+    int bottom = letterbox_pad_y;
+    int left = letterbox_pad_x;
+    int right = letterbox_pad_x;
+
+    cv::copyMakeBorder(resized_image, preprocessed_image, top, bottom, left, right,
+                       cv::BORDER_CONSTANT, cv::Scalar(114));
 }
 
-void scale_coordinates(YOLOv7Result &detection, const std::vector<int> &pad_xy, const float letterbox_scale)
+/**
+ * @brief Convert detection coordinates from letterbox padded/scaled image back
+ * to original image coordinates.
+ * @param detection Detection result object to convert
+ * @param pad_xy [x, y] vector for padding size
+ * @param letterbox_scale Scale factor used for letterbox
+ */
+void scale_coordinates(YOLOv7Result &detection, const std::vector<int> &pad_xy,
+                       const float letterbox_scale)
 {
     detection.box[0] = (detection.box[0] - static_cast<float>(pad_xy[0])) / letterbox_scale;
     detection.box[1] = (detection.box[1] - static_cast<float>(pad_xy[1])) / letterbox_scale;
@@ -154,28 +186,57 @@ void scale_coordinates(YOLOv7Result &detection, const std::vector<int> &pad_xy, 
     detection.box[3] = (detection.box[3] - static_cast<float>(pad_xy[1])) / letterbox_scale;
 }
 
+/**
+ * @brief Visualize detection results on the image by drawing bounding boxes,
+ * confidence scores.
+ * @param frame Original image
+ * @param detections Vector of detection results
+ * @param pad_xy [x, y] vector for padding size
+ * @param letterbox_scale Scale factor used for letterbox
+ * @return Visualized image (Mat)
+ */
 cv::Mat draw_detections(const cv::Mat &frame, std::vector<YOLOv7Result> &detections,
                         const std::vector<int> &pad_xy, const float letterbox_scale)
 {
     cv::Mat result = frame.clone();
+
     for (auto &detection : detections)
     {
         scale_coordinates(detection, pad_xy, letterbox_scale);
+        // Get class-specific color
         cv::Scalar box_color = get_class_color(detection.class_id);
+
+        // Draw bounding box with class-specific color
         cv::Point2f tl(detection.box[0], detection.box[1]);
         cv::Point2f br(detection.box[2], detection.box[3]);
         cv::rectangle(result, tl, br, box_color, 2);
 
-        std::string conf_text = detection.class_name + ": " + std::to_string(static_cast<int>(detection.confidence * 100)) + "%";
+        // Draw class name and confidence score with background
+        std::string conf_text = detection.class_name + ": " +
+                                std::to_string(static_cast<int>(detection.confidence * 100)) + "%";
+
+        // Get text size to create background rectangle
         int font_face = cv::FONT_HERSHEY_SIMPLEX;
         double font_scale = 0.5;
-        int thickness = 1, baseline = 0;
-        cv::Size text_size = cv::getTextSize(conf_text, font_face, font_scale, thickness, &baseline);
+        int thickness = 1;
+        int baseline = 0;
+        cv::Size text_size =
+            cv::getTextSize(conf_text, font_face, font_scale, thickness, &baseline);
+
+        // Calculate text position
         cv::Point text_pos(detection.box[0], detection.box[1] - 10);
-        cv::rectangle(result, cv::Point(text_pos.x, text_pos.y - text_size.height),
-                      cv::Point(text_pos.x + text_size.width, text_pos.y + baseline), cv::Scalar(0, 0, 0), -1);
-        cv::putText(result, conf_text, text_pos, font_face, font_scale, cv::Scalar(255, 255, 255), thickness);
+
+        // Draw black background rectangle
+        cv::Point bg_tl(text_pos.x, text_pos.y - text_size.height);
+        cv::Point bg_br(text_pos.x + text_size.width, text_pos.y + baseline);
+        cv::rectangle(result, bg_tl, bg_br, cv::Scalar(0, 0, 0),
+                      -1); // Black background
+
+        // Draw white text on black background
+        cv::putText(result, conf_text, text_pos, font_face, font_scale, cv::Scalar(255, 255, 255),
+                    thickness);
     }
+
     return result;
 }
 
@@ -199,7 +260,8 @@ void post_process_thread_func(SafeQueue<std::shared_ptr<DetectionArgs>> *wait_qu
 
         auto outputs = args->ie->Wait(args->request_id);
         auto t1 = std::chrono::high_resolution_clock::now();
-        double inference_time = std::chrono::duration<double, std::milli>(t1 - args->t_run_async_start).count();
+        double inference_time =
+            std::chrono::duration<double, std::milli>(t1 - args->t_run_async_start).count();
 
         auto detections_vec = args->ypp->postprocess(outputs);
         auto t2 = std::chrono::high_resolution_clock::now();
@@ -232,8 +294,9 @@ void post_process_thread_func(SafeQueue<std::shared_ptr<DetectionArgs>> *wait_qu
     }
 }
 
-void display_thread_func(SafeQueue<std::shared_ptr<DisplayArgs>> *display_queue, std::atomic<int> *appQuit,
-                         cv::VideoWriter *writer, std::vector<int> *pad_xy, float *scale_factor)
+void display_thread_func(SafeQueue<std::shared_ptr<DisplayArgs>> *display_queue,
+                         std::atomic<int> *appQuit, cv::VideoWriter *writer,
+                         std::vector<int> *pad_xy, float *scale_factor)
 {
     while (appQuit->load() == -1)
         std::this_thread::sleep_for(std::chrono::microseconds(10));
@@ -251,7 +314,8 @@ void display_thread_func(SafeQueue<std::shared_ptr<DisplayArgs>> *display_queue,
             continue;
 
         auto render_start = std::chrono::high_resolution_clock::now();
-        auto processed_frame = draw_detections(*args->original_frame, *args->detections, *pad_xy, *scale_factor);
+        auto processed_frame =
+            draw_detections(*args->original_frame, *args->detections, *pad_xy, *scale_factor);
 
         if (!processed_frame.empty())
         {
@@ -269,7 +333,8 @@ void display_thread_func(SafeQueue<std::shared_ptr<DisplayArgs>> *display_queue,
             (*args->processed_count)++;
 
         auto render_end = std::chrono::high_resolution_clock::now();
-        double render_time = std::chrono::duration<double, std::milli>(render_end - render_start).count();
+        double render_time =
+            std::chrono::duration<double, std::milli>(render_end - render_start).count();
 
         if (args->metrics)
         {
@@ -282,55 +347,166 @@ void display_thread_func(SafeQueue<std::shared_ptr<DisplayArgs>> *display_queue,
     }
 }
 
-void print_performance_summary(const ProfilingMetrics &metrics, int total_frames, double total_time_sec, bool display_on)
+void print_performance_summary(const ProfilingMetrics &metrics, int total_frames,
+                               double total_time_sec, bool display_on)
 {
     if (metrics.infer_completed == 0)
         return;
+
     double avg_read = metrics.sum_read / metrics.infer_completed;
     double avg_pre = metrics.sum_preprocess / metrics.infer_completed;
     double avg_inf = metrics.sum_inference / metrics.infer_completed;
     double avg_post = metrics.sum_postprocess / metrics.infer_completed;
 
-    auto inflight_time_window = std::chrono::duration<double>(metrics.infer_last_ts - metrics.infer_first_ts).count();
-    double infer_tp = (inflight_time_window > 0) ? metrics.infer_completed / inflight_time_window : 0.0;
+    auto inflight_time_window =
+        std::chrono::duration<double>(metrics.infer_last_ts - metrics.infer_first_ts).count();
 
-    std::cout << "\n================ PERFORMANCE SUMMARY ================" << std::endl;
-    std::cout << "Avg Latency: Pre: " << avg_pre << "ms, Inf: " << avg_inf << "ms, Post: " << avg_post << "ms" << std::endl;
-    std::cout << "Throughput: " << infer_tp << " FPS (Async)" << std::endl;
-    std::cout << "Total Frames: " << total_frames << ", Total Time: " << total_time_sec << "s" << std::endl;
-    std::cout << "Overall FPS: " << total_frames / total_time_sec << " FPS" << std::endl;
-    std::cout << "======================================================" << std::endl;
+    double infer_tp =
+        (inflight_time_window > 0) ? metrics.infer_completed / inflight_time_window : 0.0;
+    double inflight_avg =
+        (inflight_time_window > 0) ? metrics.inflight_time_sum / inflight_time_window : 0.0;
+
+    double read_fps = avg_read > 0 ? 1000.0 / avg_read : 0.0;
+    double pre_fps = avg_pre > 0 ? 1000.0 / avg_pre : 0.0;
+    double post_fps = avg_post > 0 ? 1000.0 / avg_post : 0.0;
+
+    std::cout << "\n==================================================" << std::endl;
+    std::cout << "               PERFORMANCE SUMMARY                " << std::endl;
+    std::cout << "==================================================" << std::endl;
+    std::cout << " Pipeline Step   Avg Latency     Throughput     " << std::endl;
+    std::cout << "--------------------------------------------------" << std::endl;
+    std::cout << " " << std::left << std::setw(15) << "Read" << std::right << std::setw(8)
+              << std::fixed << std::setprecision(2) << avg_read << " ms     " << std::setw(6)
+              << std::setprecision(1) << read_fps << " FPS" << std::endl;
+    std::cout << " " << std::left << std::setw(15) << "Preprocess" << std::right << std::setw(8)
+              << std::fixed << std::setprecision(2) << avg_pre << " ms     " << std::setw(6)
+              << std::setprecision(1) << pre_fps << " FPS" << std::endl;
+    std::cout << " " << std::left << std::setw(15) << "Inference" << std::right << std::setw(8)
+              << std::fixed << std::setprecision(2) << avg_inf << " ms     " << std::setw(6)
+              << std::setprecision(1) << infer_tp << " FPS*" << std::endl;
+    std::cout << " " << std::left << std::setw(15) << "Postprocess" << std::right << std::setw(8)
+              << std::fixed << std::setprecision(2) << avg_post << " ms     " << std::setw(6)
+              << std::setprecision(1) << post_fps << " FPS" << std::endl;
+
+    if (display_on)
+    {
+        double avg_render = metrics.sum_render / metrics.infer_completed;
+        double render_fps = avg_render > 0 ? 1000.0 / avg_render : 0.0;
+        std::cout << " " << std::left << std::setw(15) << "Display" << std::right << std::setw(8)
+                  << std::fixed << std::setprecision(2) << avg_render << " ms     " << std::setw(6)
+                  << std::setprecision(1) << render_fps << " FPS" << std::endl;
+    }
+    std::cout << "--------------------------------------------------" << std::endl;
+    std::cout << " * Actual throughput via async inference" << std::endl;
+    std::cout << "--------------------------------------------------" << std::endl;
+    std::cout << " " << std::left << std::setw(19) << "Infer Completed"
+              << " :    " << metrics.infer_completed << std::endl;
+    std::cout << " " << std::left << std::setw(19) << "Infer Inflight Avg"
+              << " :    " << std::fixed << std::setprecision(1) << inflight_avg << std::endl;
+    std::cout << " " << std::left << std::setw(19) << "Infer Inflight Max"
+              << " :      " << metrics.inflight_max << std::endl;
+    std::cout << "--------------------------------------------------" << std::endl;
+
+    double overall_fps = (total_time_sec > 0) ? total_frames / total_time_sec : 0.0;
+
+    std::cout << " " << std::left << std::setw(19) << "Total Frames"
+              << " :    " << total_frames << std::endl;
+    std::cout << " " << std::left << std::setw(19) << "Total Time"
+              << " :    " << std::fixed << std::setprecision(1) << total_time_sec << " s"
+              << std::endl;
+    std::cout << " " << std::left << std::setw(19) << "Overall FPS"
+              << " :   " << std::fixed << std::setprecision(1) << overall_fps << " FPS"
+              << std::endl;
+    std::cout << "==================================================" << std::endl;
 }
-
-// --- 5. Main ---
 
 int main(int argc, char *argv[])
 {
     DXRT_TRY_CATCH_BEGIN
     std::atomic<int> appQuit(-1);
-    std::string modelPath, imgFile, videoFile, rtspUrl;
+    std::string modelPath = "", imgFile = "", videoFile = "", rtspUrl = "";
     int cameraIndex = -1;
     bool fps_only = false, saveVideo = false;
     int loopTest = 1, processCount = 0;
 
-    cxxopts::Options options("YOLOv7 Async", "YOLOv7 Object Detection");
-    options.add_options()("m,model_path", "Model path", cxxopts::value<std::string>(modelPath))("i,image_path", "Image path", cxxopts::value<std::string>(imgFile))("v,video_path", "Video path", cxxopts::value<std::string>(videoFile))("c,camera_index", "Camera index", cxxopts::value<int>(cameraIndex))("r,rtsp_url", "RTSP URL", cxxopts::value<std::string>(rtspUrl))("s,save_video", "Save video", cxxopts::value<bool>(saveVideo))("l,loop", "Loop count", cxxopts::value<int>(loopTest)->default_value("1"))("no-display", "FPS only", cxxopts::value<bool>(fps_only))("h,help", "Help");
+    std::string app_name = "YOLOv7 Post-Processing Async Example";
+    cxxopts::Options options(app_name, app_name + " application usage ");
+    options.add_options()("m, model_path", "object detection model file (.dxnn, required)",
+                          cxxopts::value<std::string>(modelPath))(
+        "i, image_path", "input image file path(jpg, png, jpeg ...)",
+        cxxopts::value<std::string>(imgFile))("v, video_path",
+                                              "input video file path(mp4, mov, avi ...)",
+                                              cxxopts::value<std::string>(videoFile))(
+        "c, camera_index", "camera device index (e.g., 0)",
+        cxxopts::value<int>(cameraIndex))("r, rtsp_url", "RTSP stream URL",
+                                          cxxopts::value<std::string>(rtspUrl))(
+        "s, save_video", "save processed video",
+        cxxopts::value<bool>(saveVideo)->default_value("false"))(
+        "l, loop", "Number of inference iterations to run",
+        cxxopts::value<int>(loopTest)->default_value("1"))(
+        "no-display", "will not visualize, only show fps",
+        cxxopts::value<bool>(fps_only)->default_value("false"))("h, help", "print usage");
 
-    auto result = options.parse(argc, argv);
-    if (result.count("help") || modelPath.empty())
+    auto cmd = options.parse(argc, argv);
+    if (cmd.count("help"))
     {
         std::cout << options.help() << std::endl;
-        return 0;
+        exit(0);
+    }
+    // Validate required arguments
+    if (modelPath.empty())
+    {
+        std::cerr << "[ERROR] Model path is required. Use -m or "
+                     "--model_path option."
+                  << std::endl;
+        std::cerr << "Use -h or --help for usage information." << std::endl;
+        exit(1);
+    }
+
+    int sourceCount = 0;
+    if (!imgFile.empty())
+        sourceCount++;
+    if (!videoFile.empty())
+        sourceCount++;
+    if (cameraIndex >= 0)
+        sourceCount++;
+    if (!rtspUrl.empty())
+        sourceCount++;
+
+    if (sourceCount != 1)
+    {
+        std::cerr << "[ERROR] Please specify exactly one input source: image (-i), video (-v), "
+                     "camera (-c), or RTSP (-r)."
+                  << std::endl;
+        std::cerr << "Use -h or --help for usage information." << std::endl;
+        exit(1);
     }
 
     dxrt::InferenceOption io;
     dxrt::InferenceEngine ie(modelPath, io);
-    auto input_shape = ie.GetInputs().front().shape();
-    int input_height = (int)input_shape[1], input_width = (int)input_shape[2];
-    auto post_processor = YOLOv7PostProcess(input_width, input_height, 0.25f, 0.25f, 0.45f, ie.IsOrtConfigured());
+    if (!dxapp::common::minversionforRTandCompiler(&ie))
+    {
+        std::cerr << "[DXAPP] [ER] The version of the compiled model is not "
+                     "compatible with the "
+                     "version of the runtime. Please compile the model again."
+                  << std::endl;
+        return -1;
+    }
 
-    std::vector<std::vector<uint8_t>> input_buffers(ASYNC_BUFFER_SIZE, std::vector<uint8_t>(ie.GetInputSize()));
-    std::vector<std::vector<uint8_t>> output_buffers(ASYNC_BUFFER_SIZE, std::vector<uint8_t>(ie.GetOutputSize()));
+    auto input_shape = ie.GetInputs().front().shape();
+    int input_height = static_cast<int>(input_shape[1]);
+    int input_width = static_cast<int>(input_shape[2]);
+    auto post_processor =
+        YOLOv7PostProcess(input_width, input_height, 0.25f, 0.25f, 0.45f, ie.IsOrtConfigured());
+
+    // Print model input size
+    std::cout << "[INFO] Model input size (WxH): " << input_width << "x" << input_height
+              << std::endl;
+
+    std::vector<std::vector<uint8_t>> input_buffers(ASYNC_BUFFER_SIZE,
+                                                    std::vector<uint8_t>(ie.GetInputSize()));
+    std::vector<std::vector<uint8_t>> output_buffers(ASYNC_BUFFER_SIZE,
+                                                     std::vector<uint8_t>(ie.GetOutputSize()));
 
     SafeQueue<std::shared_ptr<DetectionArgs>> wait_queue;
     SafeQueue<std::shared_ptr<DisplayArgs>> display_queue;
@@ -341,7 +517,8 @@ int main(int argc, char *argv[])
     float scale_factor = 1.0f;
 
     std::thread post_thread(post_process_thread_func, &wait_queue, &display_queue, &appQuit);
-    std::thread disp_thread(display_thread_func, &display_queue, &appQuit, &writer, &pad_xy, &scale_factor);
+    std::thread disp_thread(display_thread_func, &display_queue, &appQuit, &writer, &pad_xy,
+                            &scale_factor);
 
     cv::VideoCapture video;
     bool is_image = !imgFile.empty();
@@ -362,10 +539,12 @@ int main(int argc, char *argv[])
     if (saveVideo)
     {
         double fps = video.get(cv::CAP_PROP_FPS);
-        writer.open("result.mp4", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), fps > 0 ? fps : 30.0, cv::Size(SHOW_WINDOW_SIZE_W, SHOW_WINDOW_SIZE_H));
+        writer.open("result.mp4", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), fps > 0 ? fps : 30.0,
+                    cv::Size(SHOW_WINDOW_SIZE_W, SHOW_WINDOW_SIZE_H));
     }
 
-    std::vector<cv::Mat> images(ASYNC_BUFFER_SIZE, cv::Mat(SHOW_WINDOW_SIZE_H, SHOW_WINDOW_SIZE_W, CV_8UC3));
+    std::vector<cv::Mat> images(ASYNC_BUFFER_SIZE,
+                                cv::Mat(SHOW_WINDOW_SIZE_H, SHOW_WINDOW_SIZE_W, CV_8UC3));
     int index = 0, submitted_frames = 0;
     auto s_time = std::chrono::high_resolution_clock::now();
 
@@ -411,7 +590,8 @@ int main(int argc, char *argv[])
             auto tr1 = std::chrono::high_resolution_clock::now();
             {
                 std::lock_guard<std::mutex> lk(profiling_metrics.metrics_mutex);
-                profiling_metrics.sum_read += std::chrono::duration<double, std::milli>(tr1 - tr0).count();
+                profiling_metrics.sum_read +=
+                    std::chrono::duration<double, std::milli>(tr1 - tr0).count();
             }
 
             auto t0 = std::chrono::high_resolution_clock::now();
